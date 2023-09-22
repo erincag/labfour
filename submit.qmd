@@ -1,28 +1,153 @@
 ---
-title: ""
-author: ""
-format:
-  html:
-    embed-resources: true
+title: "Lab 4"
+author: "Erin Cagle"
+format: html
+editor: visual
+embed-resources: true
 ---
 
-## Quarto
-
-Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
-
-## Running Code
-
-When you click the **Render** button a document will be generated that includes both content and the output of embedded code. You can embed code like this:
+## Read in the Data
 
 ```{r}
-1 + 1
+if (!file.exists("met_all.gz"))
+  download.file(
+    url = "https://raw.githubusercontent.com/USCbiostats/data-science-data/master/02_met/met_all.gz",
+    destfile = "met_all.gz",
+    method   = "libcurl",
+    timeout  = 60
+    )
+met <- data.table::fread("met_all.gz")
 ```
 
-You can add options to executable code like this
+Download the needed file and read in the dataset.
+
+## Prepare Data
 
 ```{r}
-#| echo: false
-2 * 2
+met <- met[met$temp > -17.00]
+date <- as.Date(paste(met$year, met$month, met$day, sep = "-" ))
+met$date = date
+
+# below is another way to do this
+# met = mutate(met, date =year, month, day, sep ="-") 
+
+weeks <- data.table::week(met$date)
+met <- met[weeks < 33 & day < 8]
+met_date <- met[order(met$day)]
+tail(met_date)
 ```
 
-The `echo: false` option disables the printing of code (only output is displayed).
+```{r}
+met_avg <- met_date[,.(
+  temp     = mean(temp,na.rm=TRUE),
+  rh       = mean(rh,na.rm=TRUE),
+  wind.sp  = mean(wind.sp,na.rm=TRUE),
+  vis.dist = mean(vis.dist,na.rm=TRUE),
+  lat      = mean(lat),
+  lon      = mean(lon), 
+  elev     = mean(elev,na.rm=TRUE),
+  dew.point = mean(dew.point,na.rm=TRUE)
+), by=c("USAFID")]
+```
+
+Find the averages based on the stations
+
+```{r}
+cen_lat <- 39.71
+cen_lon <- -98.00
+
+region <- ifelse(met_avg$lat > cen_lat & met_avg$lon < cen_lon, "NW",
+                  ifelse(met_avg$lat > cen_lat & met_avg$lon > cen_lon, "NE",
+                  ifelse(met_avg$lat < cen_lat & met_avg$lon < cen_lon, "SW",
+                  ifelse(met_avg$lat < cen_lat & met_avg$lon > cen_lon, "SE", "At Center"))))
+met_avg$region <- region
+
+met_avg$elevcat <- ifelse(met_avg$elev > 252, "High", "Low")
+```
+
+Identify central lines of lat and long. Define regions based on these lines. Define categories for elevation.
+
+## Using geom_violin
+
+```{r}
+library(ggplot2)
+ggplot(met_avg[!is.na(wind.sp) & !is.na(dew.point)]) + 
+  geom_violin(mapping = aes(x = dew.point, y = wind.sp)) +
+  facet_wrap(~ region, nrow = 1)
+```
+
+NW and SW regions appear to have similar densities while NE and SE have a similar shape on the lower end of wind speed.
+
+## Using geom_jitter and stat_smooth
+
+```{r}
+met_avg <- met_avg[!is.na(wind.sp) & !is.na(dew.point)]
+ggplot(met_avg[1:1000],mapping = aes(x = dew.point, y = wind.sp)) +   
+  geom_point(mapping = aes (color = region), position = "jitter") +
+  geom_smooth(mapping =aes (linetype = region), method = lm, se = FALSE)
+```
+
+SE region has a strong positive correlation between dew point and wind speed. NE region has a moderate positive correlation between dew point and wind speed. NW has a weak positive correlation, and SW has a weak negative correlation.
+
+## Using geom_bar
+
+```{r}
+ggplot(data = met_avg) +
+  geom_bar(mapping = aes(x = elevcat, fill = region), color = "black", position = "dodge") +
+    scale_fill_brewer(palette = "Paired") +
+  labs(title = "Weather Station Elevation") +
+  labs(x = "Elevation", y = "Stations (count)")
+```
+
+Stations at higher elevations appear to be more evenly spread throughout the regions. Conversely, there appears to be a significant disparity between the number of stations at lower elevations between regions. SE has the most, and NW has the least.
+
+## Using stat_summary
+
+```{r}
+library(Hmisc)
+library(cowplot)
+wind <- ggplot(data = met_avg) + stat_summary(mapping = aes(x = region, y = wind.sp), fun.data="mean_sdl", geom = "errorbar")
+dew <- ggplot(data = met_avg) + stat_summary(mapping = aes(x = region, y = dew.point), fun.data="mean_sdl", geom = "errorbar")
+plot_grid(wind, dew, labels = c("Wind Speed", "Dew Point"))
+```
+
+Wind speed appears to have equal error in each region. However, dew point for NW and SW regions have large error ranges while NE and SE have relatively small error bars.
+
+## Mapping
+
+```{r}
+met2 <- met[!is.na(rh)]
+library(leaflet)
+met_avg2 <- met[,.(rh = mean(rh,na.rm=TRUE), lat = mean(lat), lon = mean(lon)),  by=c("USAFID")]
+temp.pal <- colorNumeric(c('lightblue','blue','navy'), domain=met_avg2$rh)
+leaflet(met_avg2) |>
+  addProviderTiles('CartoDB.Positron') |>
+  addCircles(lat = ~lat, lng= ~lon, label = ~paste0(round(rh)), color = ~temp.pal(rh), opacity = 1, fillOpacity = 1, radius = 500) |> addLegend('bottomleft', pal=temp.pal, values=met_avg2$rh, title='Relative Humidity', opacity=1)
+```
+
+Humidity increases from west to east coast
+
+## Using ggplot extension
+
+```{r}
+region <- ifelse(met_date$lat > cen_lat & met_date$lon < cen_lon, "NW",
+                  ifelse(met_date$lat > cen_lat & met_date$lon > cen_lon, "NE",
+                  ifelse(met_date$lat < cen_lat & met_date$lon < cen_lon, "SW",
+                  ifelse(met_date$lat < cen_lat & met_date$lon > cen_lon, "SE", "At Center"))))
+met_date$region <- region
+met_dayavg <- met_date[,.(
+  temp     = mean(temp,na.rm=TRUE),
+  rh       = mean(rh,na.rm=TRUE),
+  wind.sp  = mean(wind.sp,na.rm=TRUE),
+  vis.dist = mean(vis.dist,na.rm=TRUE),
+  lat      = mean(lat),
+  lon      = mean(lon), 
+  elev     = mean(elev,na.rm=TRUE),
+  dew.point = mean(dew.point,na.rm=TRUE)
+), by=c("day")]
+library(gganimate)
+ggplot(met_dayavg, aes(x = temp, y = rh)) +
+  labs(title = 'Day: {frame time}', x = "Temperature", y = "Relative Humidity") +
+  transition_time(day) +
+  ease_aes('linear')
+```
